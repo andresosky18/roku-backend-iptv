@@ -15,7 +15,7 @@ export default async function handler(req, res) {
     // 2. Procesar el texto
     const datosEstructurados = parsearM3U(m3uText);
 
-    // 3. Enviar a Firebase (Método PUT para sobrescribir)
+    // 3. Enviar a Firebase
     const firebaseConfig = {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -24,7 +24,7 @@ export default async function handler(req, res) {
 
     const firebaseResponse = await fetch(FIREBASE_URL, firebaseConfig);
     
-  if (!firebaseResponse.ok) {
+    if (!firebaseResponse.ok) {
         const errorDetalle = await firebaseResponse.text();
         throw new Error("Error detallado de Firebase: " + errorDetalle);
     }
@@ -65,7 +65,16 @@ function parsearM3U(texto) {
     } else if (linea.startsWith('http') || linea.startsWith('rtmp')) {
       canalActual.url = linea;
       
-      const grupoKey = canalActual.grupo.toLowerCase().replace(/\s+/g, '_');
+      // LIMPIEZA EXTREMA PARA FIREBASE
+      let grupoKey = canalActual.grupo
+        .toLowerCase()
+        .replace(/\s+/g, '_') // Cambia espacios por guiones bajos
+        .replace(/[^a-z0-9_]/g, ''); // ELIMINA absolutamente todo lo que no sea letra, número o guion bajo
+      
+      // Si la limpieza deja el nombre vacío, lo mandamos a "general" para evitar el error de Firebase
+      if (!grupoKey || grupoKey === '') {
+        grupoKey = 'general';
+      }
       
       if (!categorias[grupoKey]) {
         categorias[grupoKey] = [];
@@ -78,5 +87,4 @@ function parsearM3U(texto) {
 
   return categorias;
 }
-
 // Forzando el despliegue automático en Vercel
