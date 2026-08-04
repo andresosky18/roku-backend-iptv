@@ -15,8 +15,7 @@ export default async function handler(req, res) {
     // 2. Procesar el texto
     const datosEstructurados = parsearM3U(m3uText);
 
-    // 3. Enviar a Firebase
-    // Usamos el método 'PUT' para que sobrescriba los datos antiguos con los nuevos, evitando duplicados.
+    // 3. Enviar a Firebase (Método PUT para sobrescribir)
     const firebaseConfig = {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
