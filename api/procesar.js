@@ -24,8 +24,9 @@ export default async function handler(req, res) {
 
     const firebaseResponse = await fetch(FIREBASE_URL, firebaseConfig);
     
-    if (!firebaseResponse.ok) {
-        throw new Error("Hubo un problema al guardar en Firebase");
+  if (!firebaseResponse.ok) {
+        const errorDetalle = await firebaseResponse.text();
+        throw new Error("Error detallado de Firebase: " + errorDetalle);
     }
 
     // Respuesta final al navegador
