@@ -77,3 +77,5 @@ function parsearM3U(texto) {
 
   return categorias;
 }
+
+// Forzando el despliegue automático en Vercel
