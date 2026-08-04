@@ -2,19 +2,37 @@ export default async function handler(req, res) {
   // URL cruda de tu lista M3U en GitHub
   const GITHUB_M3U_URL = "https://raw.githubusercontent.com/andresosky18/paty-tv/refs/heads/main/colombia.m3u";
   
+  // Tu URL real de Firebase
+  const FIREBASE_URL = "https://roku-iptv-default-rtdb.firebaseio.com/categorias.json";
+
   try {
+    // 1. Descargar la lista
     const response = await fetch(GITHUB_M3U_URL);
     if (!response.ok) throw new Error("No se pudo descargar la lista de GitHub");
     
     const m3uText = await response.text();
+    
+    // 2. Procesar el texto
     const datosEstructurados = parsearM3U(m3uText);
 
-    // TODO: En el futuro, aquí agregaremos el código para enviar a Firebase.
-    // Por ahora, devolvemos el JSON al navegador para probar que funciona.
+    // 3. Enviar a Firebase
+    // Usamos el método 'PUT' para que sobrescriba los datos antiguos con los nuevos, evitando duplicados.
+    const firebaseConfig = {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(datosEstructurados)
+    };
+
+    const firebaseResponse = await fetch(FIREBASE_URL, firebaseConfig);
+    
+    if (!firebaseResponse.ok) {
+        throw new Error("Hubo un problema al guardar en Firebase");
+    }
+
+    // Respuesta final al navegador
     res.status(200).json({ 
-      mensaje: "Procesamiento exitoso", 
-      total_categorias: Object.keys(datosEstructurados).length,
-      datos: datosEstructurados 
+      mensaje: "¡Magia pura! Lista procesada y guardada en Firebase exitosamente.", 
+      total_categorias: Object.keys(datosEstructurados).length
     });
 
   } catch (error) {
