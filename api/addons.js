@@ -1,6 +1,7 @@
 import { getAdminDb } from '../lib/firebaseAdmin.js';
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
+import { createHash } from 'node:crypto';
 
 const MAX_JSON_BYTES = 2 * 1024 * 1024;
 const FETCH_TIMEOUT_MS = 9000;
@@ -68,8 +69,55 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: 'Falta la URL del manifest.json.' });
       }
 
-      const manifest = await safeFetchJson(manifestUrl);
-      const normalizedManifest = validateAndNormalizeManifest(manifest, manifestUrl);
+      const validatedManifestUrl = await validatePublicRemoteUrl(manifestUrl);
+
+      if (!validatedManifestUrl.pathname.toLowerCase().endsWith('/manifest.json')) {
+        return res.status(400).json({ error: 'La URL debe apuntar a un manifest.json.' });
+      }
+
+      let manifest;
+
+      try {
+        manifest = await safeFetchJson(validatedManifestUrl.toString());
+      } catch (fetchError) {
+        // Some hosts reject Vercel/cloud IPs but may accept a normal client.
+        // Save that URL for a standard direct request from the user's Roku.
+        // This does not bypass authentication or other access controls.
+        if (fetchError?.remoteStatus === 403) {
+          const directAddon = makeDirectAddon(validatedManifestUrl.toString());
+          const next = [...addons];
+
+          const idx = next.findIndex(a =>
+            String(a?.id || '') === directAddon.id ||
+            String(a?.manifestUrl || '') === directAddon.manifestUrl
+          );
+
+          if (idx >= 0) {
+            directAddon.installedAt = next[idx].installedAt || directAddon.installedAt;
+            next[idx] = directAddon;
+          } else {
+            next.push(directAddon);
+          }
+
+          await deviceRef.child('addons').set(next);
+
+          return res.status(200).json({
+            ok: true,
+            directFallback: true,
+            needsClientResolve: true,
+            message: 'El host bloqueó a Vercel. Se guardó para probar acceso directo desde AURA TV.',
+            addon: publicAddon(directAddon),
+            addons: next.map(publicAddon)
+          });
+        }
+
+        throw fetchError;
+      }
+
+      const normalizedManifest = validateAndNormalizeManifest(
+        manifest,
+        validatedManifestUrl.toString()
+      );
 
       const addon = {
         id: normalizedManifest.id,
@@ -82,12 +130,18 @@ export default async function handler(req, res) {
         resources: normalizedManifest.resources,
         types: normalizedManifest.types,
         catalogs: normalizedManifest.catalogs,
+        mode: 'proxy',
+        status: 'ready',
         installedAt: new Date().toISOString(),
         updatedAt: new Date().toISOString()
       };
 
       const next = [...addons];
-      const idx = next.findIndex(a => String(a?.id || '') === addon.id);
+
+      const idx = next.findIndex(a =>
+        String(a?.id || '') === addon.id ||
+        String(a?.manifestUrl || '') === addon.manifestUrl
+      );
 
       if (idx >= 0) {
         addon.installedAt = next[idx].installedAt || addon.installedAt;
@@ -100,6 +154,7 @@ export default async function handler(req, res) {
 
       return res.status(200).json({
         ok: true,
+        directFallback: false,
         addon: publicAddon(addon),
         addons: next.map(publicAddon)
       });
@@ -381,10 +436,39 @@ function publicAddon(addon) {
     description: String(addon?.description || ''),
     logo: safeHttpUrlOrEmpty(addon?.logo),
     manifestUrl: String(addon?.manifestUrl || ''),
+    baseUrl: String(addon?.baseUrl || ''),
+    mode: String(addon?.mode || 'proxy'),
+    status: String(addon?.status || 'ready'),
     resources: Array.isArray(addon?.resources) ? addon.resources : [],
     types: Array.isArray(addon?.types) ? addon.types : [],
     catalogs: Array.isArray(addon?.catalogs) ? addon.catalogs : [],
     installedAt: addon?.installedAt || ''
+  };
+}
+
+function makeDirectAddon(manifestUrl) {
+  const parsed = new URL(manifestUrl);
+  const idHash = createHash('sha256').update(manifestUrl).digest('hex').slice(0, 20);
+
+  parsed.pathname = parsed.pathname.replace(/\/manifest\.json$/i, '') || '/';
+  parsed.search = '';
+  parsed.hash = '';
+
+  return {
+    id: `direct.${idHash}`,
+    manifestUrl,
+    baseUrl: stripTrailingSlash(parsed.toString()),
+    name: parsed.hostname,
+    version: '',
+    description: 'Pendiente de lectura directa desde AURA TV.',
+    logo: '',
+    resources: [],
+    types: [],
+    catalogs: [],
+    mode: 'direct',
+    status: 'pending_client',
+    installedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
   };
 }
 
@@ -485,7 +569,9 @@ async function safeFetchJson(inputUrl, redirects = 0) {
     }
 
     if (!response.ok) {
-      throw publicError(502, `El add-on respondió HTTP ${response.status}.`);
+      const remoteError = publicError(502, `El add-on respondió HTTP ${response.status}.`);
+      remoteError.remoteStatus = response.status;
+      throw remoteError;
     }
 
     const contentLength = Number(response.headers.get('content-length') || 0);
