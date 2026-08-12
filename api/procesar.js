@@ -1,46 +1,29 @@
-export default async function handler(req, res) {
-  // URL cruda de tu lista M3U en GitHub
-  const GITHUB_M3U_URL = "https://raw.githubusercontent.com/andresosky18/paty-tv/refs/heads/main/colombia.m3u";
-  
-  // Tu URL real de Firebase
-  const FIREBASE_URL = "https://roku-iptv-default-rtdb.firebaseio.com/categorias.json";
+import { getAdminDb } from '../lib/firebaseAdmin.js';
 
+const GITHUB_M3U_URL =
+  'https://raw.githubusercontent.com/andresosky18/paty-tv/refs/heads/main/colombia.m3u';
+
+export default async function handler(req, res) {
   try {
-    // 1. Descargar la lista
     const response = await fetch(GITHUB_M3U_URL);
-    if (!response.ok) throw new Error("No se pudo descargar la lista de GitHub");
-    
+    if (!response.ok) throw new Error('No se pudo descargar la lista de GitHub');
+
     const m3uText = await response.text();
-    
-    // 2. Procesar el texto
     const datosEstructurados = parsearM3U(m3uText);
 
-    // 3. Enviar a Firebase
-    const firebaseConfig = {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(datosEstructurados)
-    };
+    const db = getAdminDb();
+    await db.ref('categorias').set(datosEstructurados);
 
-    const firebaseResponse = await fetch(FIREBASE_URL, firebaseConfig);
-    
-    if (!firebaseResponse.ok) {
-        const errorDetalle = await firebaseResponse.text();
-        throw new Error("Error detallado de Firebase: " + errorDetalle);
-    }
-
-    // Respuesta final al navegador
-    res.status(200).json({ 
-      mensaje: "¡Magia pura! Lista procesada y guardada en Firebase exitosamente.", 
+    return res.status(200).json({
+      mensaje: 'Lista procesada y guardada en Firebase.',
       total_categorias: Object.keys(datosEstructurados).length
     });
-
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error('AURA procesar API:', error);
+    return res.status(500).json({ error: error.message });
   }
 }
 
-// Función que lee el texto M3U y lo convierte en JSON estructurado
 function parsearM3U(texto) {
   const lineas = texto.split('\n');
   const categorias = {};
@@ -48,7 +31,6 @@ function parsearM3U(texto) {
 
   for (let i = 0; i < lineas.length; i++) {
     const linea = lineas[i].trim();
-
     if (!linea || linea === '#EXTM3U') continue;
 
     if (linea.startsWith('#EXTINF:')) {
@@ -58,28 +40,19 @@ function parsearM3U(texto) {
       const nombreCanal = partesComa[partesComa.length - 1].trim();
 
       canalActual = {
-        nombre: nombreCanal || "Canal Sin Nombre",
-        logo: logoMatch ? logoMatch[1] : "",
-        grupo: groupMatch ? groupMatch[1] : "General"
+        nombre: nombreCanal || 'Canal Sin Nombre',
+        logo: logoMatch ? logoMatch[1] : '',
+        grupo: groupMatch ? groupMatch[1] : 'General'
       };
     } else if (linea.startsWith('http') || linea.startsWith('rtmp')) {
       canalActual.url = linea;
-      
-      // LIMPIEZA EXTREMA PARA FIREBASE
-      let grupoKey = canalActual.grupo
+      let grupoKey = String(canalActual.grupo || 'general')
         .toLowerCase()
-        .replace(/\s+/g, '_') // Cambia espacios por guiones bajos
-        .replace(/[^a-z0-9_]/g, ''); // ELIMINA absolutamente todo lo que no sea letra, número o guion bajo
-      
-      // Si la limpieza deja el nombre vacío, lo mandamos a "general" para evitar el error de Firebase
-      if (!grupoKey || grupoKey === '') {
-        grupoKey = 'general';
-      }
-      
-      if (!categorias[grupoKey]) {
-        categorias[grupoKey] = [];
-      }
-      
+        .replace(/\s+/g, '_')
+        .replace(/[^a-z0-9_]/g, '');
+
+      if (!grupoKey) grupoKey = 'general';
+      if (!categorias[grupoKey]) categorias[grupoKey] = [];
       categorias[grupoKey].push(canalActual);
       canalActual = {};
     }
@@ -87,4 +60,3 @@ function parsearM3U(texto) {
 
   return categorias;
 }
-// Forzando el despliegue automático en Vercel
