@@ -271,3 +271,4 @@ async function saveDevice(url, data) {
     throw new Error('No fue posible guardar el dispositivo en Firebase.');
   }
 }
+
