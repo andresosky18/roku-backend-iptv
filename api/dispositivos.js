@@ -1,70 +1,202 @@
 export default async function handler(req, res) {
-  // 1. Configurar reglas de seguridad (CORS) para permitir acceso desde tu web
+  // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Aura-Admin-Token');
 
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
 
-  // 2. Conexión a tu Firebase (usamos una carpeta nueva llamada 'dispositivos')
-  const FIREBASE_URL = "https://roku-iptv-default-rtdb.firebaseio.com/dispositivos";
+  const FIREBASE_URL = 'https://roku-iptv-default-rtdb.firebaseio.com/dispositivos';
 
-  // 3. Extraer y limpiar parámetros
   const action = req.query.action || req.body?.action || 'get';
-  const mac = (req.query.mac || req.body?.mac || '').toUpperCase().replace(/[^A-F0-9]/g, '');
-  const key = (req.query.key || req.body?.key || '').replace(/[^0-9]/g, '');
+  const mac = normalizeMac(req.query.mac || req.body?.mac || '');
+  const key = normalizeKey(req.query.key || req.body?.key || '');
 
-  if (!mac || key.length !== 6) {
-    return res.status(400).json({ error: 'MAC o código de dispositivo inválidos.' });
+  if (!mac) {
+    return res.status(400).json({ error: 'MAC inválida.' });
   }
 
   const deviceUrl = `${FIREBASE_URL}/${mac}.json`;
 
   try {
-    // 4. Obtener datos actuales del dispositivo desde Firebase
-    let deviceRes = await fetch(deviceUrl);
+    const deviceRes = await fetch(deviceUrl, { cache: 'no-store' });
+    if (!deviceRes.ok) {
+      return res.status(502).json({ error: 'No fue posible consultar Firebase.' });
+    }
+
     let deviceData = await deviceRes.json();
 
-    // Si el dispositivo es nuevo, lo registramos
-    if (!deviceData) {
-      deviceData = { mac, key, playlists: [] };
-      await fetch(deviceUrl, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(deviceData)
-      });
-    } else {
-      // Si ya existe, validamos que el PIN coincida por seguridad
-      if (deviceData.key !== key) {
-        return res.status(403).json({ error: 'El código no coincide con esta dirección MAC.' });
+    // ------------------------------------------------------------
+    // 1. REGISTRAR DISPOSITIVO
+    // ------------------------------------------------------------
+    // Se usa cuando el Roku se presenta por primera vez.
+    if (action === 'register') {
+      if (key.length !== 6) {
+        return res.status(400).json({ error: 'Device Key inválido.' });
       }
-      if (!deviceData.playlists) deviceData.playlists = [];
+
+      if (!deviceData) {
+        deviceData = {
+          mac,
+          key,
+          playlists: [],
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        };
+
+        await saveDevice(deviceUrl, deviceData);
+
+        return res.status(200).json({
+          ok: true,
+          created: true,
+          mac,
+          key,
+          playlists: []
+        });
+      }
+
+      if (!Array.isArray(deviceData.playlists)) deviceData.playlists = [];
+
+      if (String(deviceData.key || '') !== key) {
+        return res.status(409).json({
+          error: 'Esta MAC ya está vinculada a otro Device Key.',
+          code: 'DEVICE_KEY_MISMATCH',
+          needsRelink: true,
+          mac
+        });
+      }
+
+      return res.status(200).json({
+        ok: true,
+        created: false,
+        mac,
+        key,
+        playlists: deviceData.playlists
+      });
     }
 
-    // ACCIÓN A: LEER LISTAS (Para que el Roku las descargue)
+    // ------------------------------------------------------------
+    // 2. REVINCULAR DESPUÉS DE REINSTALAR AURA TV
+    // ------------------------------------------------------------
+    // Protegido con una variable de entorno en Vercel:
+    // AURA_ADMIN_TOKEN
+    //
+    // No borra las playlists: solo reemplaza el Device Key.
+    if (action === 'relink') {
+      if (req.method !== 'POST') {
+        return res.status(405).json({ error: 'Relink requiere POST.' });
+      }
+
+      if (key.length !== 6) {
+        return res.status(400).json({ error: 'Nuevo Device Key inválido.' });
+      }
+
+      const suppliedToken =
+        req.headers['x-aura-admin-token'] ||
+        req.body?.adminToken ||
+        '';
+
+      const adminToken = process.env.AURA_ADMIN_TOKEN || '';
+
+      if (!adminToken || suppliedToken !== adminToken) {
+        return res.status(401).json({ error: 'No autorizado para revincular el dispositivo.' });
+      }
+
+      if (!deviceData) {
+        deviceData = {
+          mac,
+          key,
+          playlists: [],
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        };
+      } else {
+        if (!Array.isArray(deviceData.playlists)) deviceData.playlists = [];
+        deviceData.key = key;
+        deviceData.updatedAt = new Date().toISOString();
+      }
+
+      await saveDevice(deviceUrl, deviceData);
+
+      return res.status(200).json({
+        ok: true,
+        relinked: true,
+        mac,
+        key,
+        playlists: deviceData.playlists
+      });
+    }
+
+    // Desde aquí todas las acciones necesitan MAC + Key válidas.
+    if (key.length !== 6) {
+      return res.status(400).json({ error: 'MAC o Device Key inválidos.' });
+    }
+
+    // Mantener compatibilidad con tu comportamiento anterior:
+    // si no existe todavía, la primera llamada lo crea.
+    if (!deviceData) {
+      deviceData = {
+        mac,
+        key,
+        playlists: [],
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+      await saveDevice(deviceUrl, deviceData);
+    } else {
+      if (!Array.isArray(deviceData.playlists)) deviceData.playlists = [];
+
+      if (String(deviceData.key || '') !== key) {
+        return res.status(403).json({
+          error: 'El Device Key no coincide con esta dirección MAC.',
+          code: 'DEVICE_KEY_MISMATCH',
+          needsRelink: true
+        });
+      }
+    }
+
+    // ------------------------------------------------------------
+    // 3. LEER PLAYLISTS
+    // ------------------------------------------------------------
     if (action === 'get') {
-      return res.status(200).json({ ok: true, mac: deviceData.mac, playlists: deviceData.playlists });
+      return res.status(200).json({
+        ok: true,
+        mac: deviceData.mac || mac,
+        playlists: deviceData.playlists
+      });
     }
 
-    // ACCIÓN B: GUARDAR O ACTUALIZAR LISTA (Desde tu página web)
+    // ------------------------------------------------------------
+    // 4. CREAR / ACTUALIZAR PLAYLIST
+    // ------------------------------------------------------------
     if (action === 'upsert') {
-      const p = req.body?.playlist;
-      if (!p) return res.status(400).json({ error: 'Faltan los datos de la playlist.' });
+      if (req.method !== 'POST') {
+        return res.status(405).json({ error: 'Upsert requiere POST.' });
+      }
 
-      const id = p.id ? p.id.replace(/[^A-Za-z0-9._-]/g, '') : `pl-${Date.now()}`;
+      const p = req.body?.playlist;
+      if (!p) {
+        return res.status(400).json({ error: 'Faltan los datos de la playlist.' });
+      }
+
+      const id = p.id
+        ? String(p.id).replace(/[^A-Za-z0-9._-]/g, '')
+        : `pl-${Date.now()}`;
+
       const newPlaylist = {
-        id: id,
-        name: (p.name || 'Tv').substring(0, 80),
+        id,
+        name: String(p.name || 'Tv').substring(0, 80),
         type: ['xtream', 'm3u'].includes(p.type) ? p.type : 'xtream',
-        host: (p.host || '').substring(0, 500),
-        username: (p.username || '').substring(0, 200),
-        password: (p.password || '').substring(0, 200),
-        url: (p.url || '').substring(0, 1200)
+        host: String(p.host || '').substring(0, 500),
+        username: String(p.username || '').substring(0, 200),
+        password: String(p.password || '').substring(0, 200),
+        url: String(p.url || '').substring(0, 1200)
       };
 
       let found = false;
+
       deviceData.playlists = deviceData.playlists.map(existing => {
         if (existing.id === id) {
           found = true;
@@ -75,33 +207,67 @@ export default async function handler(req, res) {
 
       if (!found) deviceData.playlists.push(newPlaylist);
 
-      // Enviar la actualización a Firebase
-      await fetch(deviceUrl, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(deviceData)
-      });
+      deviceData.updatedAt = new Date().toISOString();
+      await saveDevice(deviceUrl, deviceData);
 
-      return res.status(200).json({ ok: true, playlist: newPlaylist, playlists: deviceData.playlists });
+      return res.status(200).json({
+        ok: true,
+        playlist: newPlaylist,
+        playlists: deviceData.playlists
+      });
     }
 
-    // ACCIÓN C: BORRAR LISTA (Desde tu página web o Roku)
+    // ------------------------------------------------------------
+    // 5. ELIMINAR PLAYLIST
+    // ------------------------------------------------------------
     if (action === 'delete') {
-      const id = req.body?.id || '';
+      if (req.method !== 'POST') {
+        return res.status(405).json({ error: 'Delete requiere POST.' });
+      }
+
+      const id = String(req.body?.id || '');
       deviceData.playlists = deviceData.playlists.filter(p => p.id !== id);
+      deviceData.updatedAt = new Date().toISOString();
 
-      await fetch(deviceUrl, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(deviceData)
+      await saveDevice(deviceUrl, deviceData);
+
+      return res.status(200).json({
+        ok: true,
+        playlists: deviceData.playlists
       });
-
-      return res.status(200).json({ ok: true, playlists: deviceData.playlists });
     }
 
     return res.status(400).json({ error: 'Acción desconocida.' });
 
   } catch (error) {
-    return res.status(500).json({ error: 'Error interno conectando con la base de datos.' });
+    console.error('AURA dispositivos API:', error);
+
+    return res.status(500).json({
+      error: 'Error interno conectando con la base de datos.'
+    });
+  }
+}
+
+function normalizeMac(value) {
+  return String(value || '')
+    .toUpperCase()
+    .replace(/[^A-F0-9]/g, '');
+}
+
+function normalizeKey(value) {
+  return String(value || '')
+    .replace(/[^0-9]/g, '')
+    .slice(0, 6);
+}
+
+async function saveDevice(url, data) {
+  const r = await fetch(url, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data)
+  });
+
+  if (!r.ok) {
+    throw new Error('No fue posible guardar el dispositivo en Firebase.');
   }
 }
